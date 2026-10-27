@@ -1,0 +1,76 @@
+OS CONCEPTS - DAY 1 : SMP vs AMP
+================================
+
+SMP and AMP are two ways to run software on a chip with more than one CPU core.
+
+
+1. SMP : Symmetric Multi-Processing
+-----------------------------------
+One OS runs on all cores. One scheduler and one set of kernel objects
+(tasks, mutexes, queues) are shared by every core.
+
+        +----------- ThreadX (one kernel image) -----------+
+        |  ready queue: TaskA TaskB TaskC TaskD ...        |
+        +----------+------------------------+--------------+
+                 Core 0                   Core 1
+
+- Any task can run on any core unless you pin it with affinity.
+- The scheduler balances the load: if core 0 is busy, a ready task runs on core 1.
+- A mutex or event flag works across cores without extra setup, because both
+  cores use the same kernel objects.
+- Cost: the kernel must use spinlocks and memory barriers internally, and a
+  cache line written on one core has to become visible on the other. The
+  hardware keeps the cores' caches coherent.
+- CV52 firmware is SMP: CONFIG_KAL_THREADX_SMP=y with 2 cores.
+  CpuBits = 0x02 on the PCIe tasks is affinity: inside SMP, it tells the
+  scheduler to run those tasks only on core 1.
+
+
+2. AMP : Asymmetric Multi-Processing
+------------------------------------
+Each core, or group of cores, runs its own separate OS or bare-metal program.
+Each has its own scheduler and memory region, and they don't share kernel objects.
+
+   Core 0: ThreadX (RTOS)        Core 1-3: Linux
+   own tasks, own mutexes        own processes, own locks
+            +---- shared memory + interrupts (RPMsg/IPC) ----+
+
+- A ThreadX mutex is invisible to Linux. The two sides talk only through IPC:
+  shared-memory buffers plus inter-core interrupts, usually RPMsg.
+- Benefit: isolation. The RTOS keeps hard real-time timing even if Linux is
+  busy or crashes.
+- Cost: you split the memory and peripherals by hand, and every cross-OS
+  exchange is an explicit message.
+- In the CV52 tree: AmbaLink (CONFIG_ATF_AMBALINK, AmbaIPC_*, SvcRpmsgApp.c)
+  is Ambarella's AMP setup, with ThreadX on some cores and Linux on others.
+  It's present in the code, but the current build runs ThreadX alone.
+
+
+3. Quick comparison
+-------------------
++--------------------+---------------------------------------+-----------------------------------------------+
+|                    | SMP                                   | AMP                                           |
++--------------------+---------------------------------------+-----------------------------------------------+
+| Number of OSes     | 1 across all cores                    | 1 per core or core group                      |
+| Scheduler          | Shared, can move tasks between cores  | Separate per OS                               |
+| Sync between cores | Ordinary mutex, semaphore, event flag | IPC / RPMsg / shared memory + interrupts      |
+| Load balancing     | Automatic (unless pinned)             | Manual (you decide what runs where)           |
+| Isolation          | Low: one crash affects all cores      | High: one OS can die, the other keeps running |
+| Example (CV52)     | ThreadX SMP on 2 A76 cores            | AmbaLink ThreadX + Linux                      |
++--------------------+---------------------------------------+-----------------------------------------------+
+
+
+4. The CV52 is AMP at the chip level
+------------------------------------
+Even though ThreadX is SMP, the whole chip works like AMP, because several
+separate processors each run their own firmware:
+
+- The Cortex-A76 cores run ThreadX SMP (the application code).
+- The DSP runs its own microcode. You talk to it through command/message
+  buffers and events.
+- The CV/VP (ORC) vision processor runs its own firmware with its own scheduler.
+- The NV180 host, across PCIe, runs Linux. You talk to it through BAR
+  registers, SEQ/ACK and the DMA ring buffer.
+
+The SEQ/ACK handshake and ring buffer are the same kind of message passing AMP
+systems use, just over PCIe instead of shared memory.
